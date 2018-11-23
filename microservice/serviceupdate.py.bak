@@ -1,0 +1,277 @@
+# -*- coding:utf-8 -*-
+import os
+import threading
+import time
+import json
+import git
+
+# 创建版本库对象
+# repo.close()
+# type(ret)
+#
+# git.remote.FetchInfo
+#
+# # print os.path.exists("D:\\microservices1")
+# # ret = os.popen("cd D:&&git clone https://github.com/xianhehu/micro_services.git")
+# # ret = os.system("cd D:\\micro_services && git pull")
+# f = os.popen("cd D:\\micro_services && git fetch", "r", -1)
+# ret = f.read()
+# f.close()
+#
+# print ret
+
+def applyyaml(path, ip, service):
+    if dircontainfile(path, service+".yaml") == False:
+        f = open(os.path.join(path, "demo.yaml"), "r")
+        str = f.read()
+        f.close()
+
+        str = str.replace("decisiontree", service)
+        str = str.replace("127.0.0.1", ip)
+
+        f = open(os.path.join(path, service+".yaml"), "w+")
+        f.write(str)
+        f.close()
+
+    cmd = "kubectl delete -f "+os.path.join(path, service)+";\n"
+    cmd += "kubectl apply -f "+os.path.join(path, service)
+
+    print u"执行：" + cmd
+
+    os.system(cmd)
+
+oldcommit = ""
+
+def checkgitpull(remote):
+    global oldcommit
+
+    try:
+        commits = remote.pull()
+    except BaseException,e:
+        print u"git pull失败"
+        return False
+
+    if len(commits) > 1:
+        return True
+
+    commit = str(commits[0].commit)
+
+    repo.close()
+
+    ret = (commit in oldcommit)
+    oldcommit = commit
+
+    return ret == False
+
+def createimage(path, ip, service):
+    image = ip+":5000/"+service
+    cmd  = "cd "+os.path.join(path, service)+";\n"
+    cmd += "docker build -t "+ image+" .;\n"
+    cmd += "docker push "+image+";\n"
+    cmd += "docker rmi "+image
+
+    print u"执行："+cmd
+
+    os.system(cmd)
+
+def listdir(path, list_name):
+    dirs = []
+
+    try:
+        for file in os.listdir(path):
+            file_path = os.path.join(path, file)
+
+            if os.path.isdir(file_path):
+                listdir(file_path, list_name)
+            elif os.path.splitext(file_path)[1] != '.log':
+                list_name.append(file_path)
+    except BaseException,e:
+        repr(e)
+
+def  dircontainfile(path, filename):
+    ret = False
+
+    try:
+        for file in os.listdir(path):
+            file_path = os.path.join(path, file)
+
+            if os.path.isdir(file_path):
+                continue
+
+            if filename in file:
+                ret = True
+
+                break
+    except BaseException,e:
+        repr(e)
+
+    return ret
+
+class MicroServiceManager(threading.Thread):
+    def __init__(self, rootpath, repopath, remote, servicesfile, ip):
+        threading.Thread.__init__(self)
+        self.rootpath = rootpath #仓库所在目录
+        self.repopath = repopath #仓库目录
+        self.remote = remote #远程git仓库地址
+        self.servicepath = os.path.join(repopath, "services")
+        self.yamlpath = os.path.join(repopath, "yamls")
+        self.ip = ip #docker 镜像仓库IP地址
+        self.ServiceTimes = {}
+        self.done = False
+        self.servicesfile = servicesfile #服务更新时间记录文件
+        self.commit = ""
+
+    def init(self):
+        try:
+            #TODO 增加启动初始化ServiceTimes
+            # f = open("/etc/microservicemanager/services.json")
+            f = open(self.servicesfile, "r+")
+            str = f.read()
+            f.close()
+
+            self.ServiceTimes = json.loads(str)
+        except BaseException,e:
+            repr(e)
+
+        return
+
+    #检查远程仓库更新
+    def checkgitupdate(self):
+        if os.path.exists(self.repopath) == False:
+            os.system("git clone " + self.remote + " " + self.repopath)
+            return True
+
+        return False
+        # return checkgitpull(self.repopath, self.commit)
+
+    def saveservices(self):
+        f = open(self.servicesfile, "w+")
+        str = json.dumps(self.ServiceTimes)
+        f.write(str)
+        f.close()
+
+        return
+
+    def checkservicesupdate(self, service):
+        file_path = os.path.join(self.servicepath, service)
+        time = os.path.getmtime(file_path)
+
+        if service in self.ServiceTimes:
+            if time <= self.ServiceTimes[service]:
+                return -1
+
+        return time
+
+    def getupdateservices(self):
+        services = {}
+
+        try:
+            for file in os.listdir(self.servicepath):
+                file_path = os.path.join(self.servicepath, file)
+
+                if os.path.isdir(file_path) == False:
+                    continue
+
+                if dircontainfile(file_path, "dockerfile") == False and dircontainfile(file_path, "Dockerfile") == False:
+                    continue
+
+                time = self.checkservicesupdate(file)
+
+                if time < 0:
+                    continue
+
+                print u"微服务" + file + u"需要更新\n"
+
+                services[file] = time
+        except BaseException, e:
+            repr(e)
+
+        return services
+
+    def updateservice(self, service, time):
+        try:
+            createimage(self.servicepath, self.ip, service)
+            applyyaml(self.yamlpath, self.ip, service)
+            self.ServiceTimes[service] = time
+        except BaseException,e:
+            repr(e)
+
+    def updateallservices(self):
+        services = self.getupdateservices()
+
+        if len(services) < 1:
+            return
+
+        for service in services:
+            self.updateservice(service, services[service])
+
+        # TODO 保存记录ServiceTimes
+        self.saveservices()
+
+    def stop(self):
+        self.done = True
+
+    def run(self):
+        lasttime = 0
+
+        while self.done == False:
+            now = time.time()
+
+            if now < lasttime+10:
+                time.sleep(0.5)
+                continue
+
+            lasttime = now
+            #
+            # if self.checkgitupdate() == False:
+            #     continue
+            self.updateallservices()
+
+        print u"微服务管理器退出\n"
+
+# applyyaml("/opt/microservices/yamls/", "192.168.11.215", "api")
+
+if __name__ == '__main__':
+    # servicemanager = MicroServiceManager("/opt/microservices/services/", "/opt/microservices/yamls/", "192.168.11.215")
+
+    # while True:
+    #     checkgitpull("", "")
+    #     time.sleep(1)
+    try:
+        repo = git.Repo("\\opt\\micro_services")
+        remote = repo.remote()
+    except BaseException,e:
+        repr(e)
+
+    servicemanager = MicroServiceManager("\\opt", "\\opt\\micro_services",
+                                         "https://github.com/xianhehu/micro_services.git",
+                                         "\\opt\\micro_services\\services\\services.json",
+                                         "10.0.17.253")
+    servicemanager.init()
+    lasttime = 0
+
+    while True:
+        now = time.time()
+
+        if now < lasttime+10:
+            time.sleep(0.1)
+            continue
+
+        lasttime = now
+
+        if servicemanager.checkgitupdate() == False:
+            if checkgitpull(remote) == False:
+                continue
+            print u"远程版本库更新"
+        else:
+            print u"本地库不存在，从远程克隆"
+            repo = git.Repo("\\opt\\micro_services")
+            remote = repo.remote()
+
+        servicemanager.updateallservices()
+
+    # raw_input(u"按Enter键退出\n")
+    #
+    # servicemanager.stop()
+    #
+    # time.sleep(1)

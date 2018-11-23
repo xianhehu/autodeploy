@@ -1,0 +1,3 @@
+reporoot = /opt
+remoterepo = git@10.0.17.253:/opt/gitrepo/micro_services.git
+imageserver = 10.0.17.253:5000
